@@ -19,8 +19,9 @@ mod eval;
 mod minmax;
 mod ttable;
 
-use minmax::*;
 use eval::*;
+use minmax::*;
+use ttable::*;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct WSMove {
@@ -28,10 +29,21 @@ struct WSMove {
     to: String,
 }
 
+impl From<ChessMove> for WSMove {
+    fn from(other: ChessMove) -> WSMove {
+        let from = other.get_source().to_string();
+        let to = other.get_dest().to_string();
+        WSMove {from, to}
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct WSState {
     legal_moves: Vec<WSMove>,
     lineup: Lineup,
+    best_line: Vec<WSMove>,
+    best_value: Score,
+    side_to_move: &'static str,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -74,21 +86,27 @@ fn lineup(board: &Board) -> Lineup {
     }
     lineup
 }
+ 
 
-fn compute_ws_state(board: Board) -> WSState {
+fn compute_ws_state(board: Board, result: &AlphaBetaResult) -> WSState {
     let iterable = MoveGen::new(board, true);
-    let legal_moves = iterable.map(|m| {
-        let from = m.get_source().to_string();
-        let to = m.get_dest().to_string();
-        WSMove {from, to}
-    }).collect();
-    WSState {legal_moves, lineup: lineup(&board)}
+    let legal_moves = iterable.map(WSMove::from).collect();
+    let best_line = result.line.iter()
+        .map(|m| WSMove::from(*m))
+        .collect();
+    let best_value = result.score;
+    let side_to_move = match board.side_to_move() {
+        Color::White => "white",
+        Color::Black => "black",
+    };
+    WSState {legal_moves, lineup: lineup(&board), best_line, best_value, side_to_move}
 }
 
 fn handle_connection(out: Sender) -> impl Handler {
     let board_cell = Cell::new(Board::default());
     let moves_cell = RefCell::new(([ChessMove::default(); 256], 0));
     move |raw_msg| {
+        let ttable = TTable::new(1000 * 1024 * 1024);
         match raw_msg {
             Message::Binary(_) => out.close(CloseCode::Error),
             Message::Text(text) => {
@@ -113,19 +131,7 @@ fn handle_connection(out: Sender) -> impl Handler {
                             }
                         };
 
-                        println!("board score (before): {}", board_score(&board, 0));
-                        for sq in board.checkers() {
-                            println!("checkers: {}", sq.to_string());
-                        }
-                        for sq in board.pinned() {
-                            println!("pinned: {}", sq.to_string());
-                        }
-
-                        if board.side_to_move() == Color::Black {
-                            if let AlphaBetaResult {cmove: Some(best_move), ..} = find_best_move(board, 6, None, true) {
-                                board = board.make_move(best_move);
-                            }
-                        }
+                        let best_move = find_best_move(board, 6, &ttable);
 
                         println!("board score: {}", board_score(&board, 0));
                         for sq in board.checkers() {
@@ -136,7 +142,7 @@ fn handle_connection(out: Sender) -> impl Handler {
                         }
 
                         *num_moves = board.enumerate_moves(moves);
-                        let state = compute_ws_state(board);
+                        let state = compute_ws_state(board, &best_move);
                         let msg = serde_json::to_string(&state).unwrap();
                         board_cell.set(board);
                         out.send(Message::Text(msg))

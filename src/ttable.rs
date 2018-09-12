@@ -1,6 +1,7 @@
 
 use eval::*;
 use std::mem;
+use std::ops;
 
 use atomic_option::AtomicOption;
 
@@ -11,6 +12,20 @@ pub enum ValueType {
     Exact,
     LowerBound,
     UpperBound,
+}
+
+use ValueType::*;
+
+impl ops::Not for ValueType {
+    type Output = ValueType;
+
+    fn not(self) -> ValueType {
+        match self {
+            Exact => Exact,
+            LowerBound => UpperBound,
+            UpperBound => LowerBound,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,9 +52,19 @@ impl TTable {
         TTable {table}
     }
 
-    pub fn put(&self, entry: Box<TEntry>) -> Option<Box<TEntry>> {
+    pub fn put(&self, entry: TEntry) {
         let index = self.hash_index(entry.hash);
-        self.table[index].swap(entry, Ordering::Relaxed)
+        let bucket = &self.table[index];
+        let boxed_entry = match bucket.take(Ordering::Relaxed) {
+            None => {
+                Box::new(entry)
+            },
+            Some(mut cur_entry) => {
+                *cur_entry = entry;
+                cur_entry
+            },
+        };
+        self.table[index].swap(boxed_entry, Ordering::Relaxed);
     }
 
     pub fn fetch(&self, hash: u64) -> Option<TEntry> {

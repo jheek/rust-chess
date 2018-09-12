@@ -14,7 +14,7 @@ pub struct SearchInfo<'a> {
 }
 
 pub struct AlphaBetaResult {
-    pub cmove: Option<ChessMove>,
+    pub line: Vec<ChessMove>,
     pub score: Score,
 }
 
@@ -41,91 +41,164 @@ fn ordered_moves<'a>(info: SearchInfo<'a>, board: &Board, target: &mut [MoveAndS
     num_moves
 }
 
+pub const MAX_DEPTH: usize = 100;
 
-pub fn find_line<'a>(mut board: Board, mut max_depth: i32, ttable_op: Option<&'a TTable>) -> String {
-    let mut result = String::new();
-    let mut first = true;
-    while max_depth > 0 {
-        let best_move = find_best_move(board, max_depth, ttable_op, false);
-        match best_move.cmove {
-            Some(cmove) => {
-                board = board.make_move(cmove);
-                if !first {
-                    result += " ";
-                }
-                result += &cmove.get_source().to_string();
-                result += "-";
-                result += &cmove.get_dest().to_string();
-                max_depth -= 1;
-                first = false;
-            },
-            None => {
-                break;
-            }
-        }
-    }
-    result
+struct ABStack {
+    board: Board,
+    alpha: Score,
+    beta: Score,
+    orig_alpha: Score,
+    moves_with_score: [MoveAndScore; 256],
+    num_moves: usize,
+    c_move: usize,
+    best_index: usize,
+    best_value: Score,
+    best_line: [ChessMove; MAX_DEPTH],
+    best_length: usize
 }
 
-pub fn find_best_move<'a>(board: Board, max_depth: i32, ttable_op: Option<&'a TTable>, verbose: bool) -> AlphaBetaResult {
-    let local_ttable;
-    let ttable = match ttable_op {
-        Some(t) => t,
-        None => {
-            local_ttable = TTable::new(100 * 1024 * 1024);
-            &local_ttable
-        }
+
+pub fn find_best_move<'a>(board: Board, max_depth: usize, ttable: &'a TTable) -> AlphaBetaResult {
+    let global_score_mul = if board.side_to_move() == Color::White { 1 } else { -1 };
+    let mut score_mul = global_score_mul;
+    let mut stack: [ABStack; MAX_DEPTH] = unsafe { mem::uninitialized() };
+    let mut n: u64 = 0;
+    stack[0] = ABStack {
+        board,
+        alpha: MIN_SCORE, beta: MAX_SCORE, orig_alpha: MIN_SCORE,
+        moves_with_score: unsafe { mem::uninitialized() },
+        num_moves: 0,
+        c_move: 0,
+        best_index: 0,
+        best_value: MIN_SCORE,
+        best_line: unsafe { mem::uninitialized() },
+        best_length: 0
     };
-
-    let info = SearchInfo { ttable };
-    let mut moves_with_score: [MoveAndScore; 256] = unsafe { mem::uninitialized() };
-    let num_moves = ordered_moves(info, &board, &mut moves_with_score);
-    if num_moves == 0 {
-        return AlphaBetaResult { cmove: None, score: MIN_SCORE };
-    }
-
-    let mut alpha_orig = MIN_SCORE;
-    let mut beta_orig = MAX_SCORE;
-
-    for depth in max_depth..=max_depth {
-        for r in 1.. {
-            if r > 1 {
-                println!("repetition: {} depth: {}", r, depth);
+    let mut d = 0;
+    loop {
+        let depth_to_go = max_depth - d - 1;
+        if stack[d].c_move == 0 {
+            if let Some(entry) = ttable.fetch(stack[d].board.get_hash()) {
+                if entry.depth >= depth_to_go as i32 {
+                    let value_type = if score_mul == 1 { entry.value_type } else { !entry.value_type };
+                    let value = score_mul * entry.value;
+                    match value_type {
+                        ValueType::Exact => {
+                            stack[d].alpha = cmp::max(stack[d].alpha, value);
+                            stack[d].beta = cmp::min(stack[d].beta, value + 1);
+                        },
+                        ValueType::LowerBound => {
+                            stack[d].alpha = cmp::max(stack[d].alpha, value);
+                        },
+                        ValueType::UpperBound => {
+                            stack[d].beta = cmp::min(stack[d].beta, value);
+                        }
+                    }
+                }
             }
-            let mut alpha = alpha_orig;
-            let beta = beta_orig;
-            for MoveAndScore {cmove, score} in moves_with_score[..num_moves].iter_mut() {
-                let move_board = board.make_move(*cmove);
-                let sub_result = alpha_beta(info, move_board, depth - 1, alpha, beta);
-                *score = -sub_result;
-                alpha = cmp::max(alpha, sub_result);
+            // init moves
+            let mut moves:[ChessMove; 256] = unsafe { mem::uninitialized() };
+            stack[d].num_moves = stack[d].board.enumerate_moves(&mut moves);
+            for (i, &cmove) in moves[..stack[d].num_moves].iter().enumerate() {
+                let move_board = stack[d].board.make_move(cmove);
+                let fast_score = ttable.fetch(move_board.get_hash())
+                    .map(|x| x.value)
+                    .unwrap_or_else(|| board_score(&move_board, 0));
+
+                stack[d].moves_with_score[i] = MoveAndScore { cmove, score: score_mul * fast_score };
             }
-            if is_maximizing {
-                moves_with_score[..num_moves].sort_unstable_by(|a, b| b.score.cmp(&a.score) );
+            stack[d].moves_with_score[..stack[d].num_moves].sort_unstable_by(|a, b| b.score.cmp(&a.score) );
+        }
+        // exit conditions
+        if stack[d].c_move == stack[d].num_moves || stack[d].alpha >= stack[d].beta {
+            // make ttable entry
+            let value = stack[d].best_value;
+            let mut value_type = if value <= stack[d].orig_alpha {
+                ValueType::LowerBound
+            } else if value >= stack[d].beta {
+                ValueType::UpperBound
             } else {
-                moves_with_score[..num_moves].sort_unstable_by(|a, b| a.score.cmp(&b.score) );
+                ValueType::Exact
+            };
+            if score_mul == -1 {
+                value_type = !value_type;
             }
-            let best_value = -moves_with_score[0].score;
-            if best_value <= alpha_orig {
-                alpha_orig = cmp::min(alpha_orig - 25 * r, best_value);
-            } else if best_value >= beta_orig {
-                beta_orig = cmp::max(beta_orig + 25 * r, best_value);
-            } else {
-                alpha_orig = best_value - 25;
-                beta_orig = best_value + 25;
+            let entry = TEntry {
+                hash: stack[d].board.get_hash(),
+                value: value * score_mul,
+                depth: depth_to_go as i32,
+                value_type,
+            };
+            ttable.put(entry);
+            // pop stack
+            if d == 0 {
                 break;
             }
+            let value = -value;
+            d -= 1;
+            score_mul *= -1;
+            stack[d].moves_with_score[stack[d].c_move].score = value;
+            if value > stack[d].best_value {
+                stack[d].alpha = cmp::max(stack[d].alpha, value);
+                stack[d].best_index = stack[d].c_move;
+                stack[d].best_value = value;
+                let length = stack[d + 1].best_length;
+                stack[d].best_length = length + 1;
+                stack[d].best_line[0] = stack[d].moves_with_score[stack[d].c_move].cmove;
+                if let Some((head, tail)) = stack[d..].split_first_mut() {
+                    head.best_line[1..=length].copy_from_slice(&tail[0].best_line[0..length]);
+                } else {
+                    panic!("Can't split stack!");
+                }
+            }
+            stack[d].c_move += 1;
+
+            continue;
+        }
+        let cmove = stack[d].moves_with_score[stack[d].c_move].cmove;
+        let next_board = stack[d].board.make_move(cmove);
+        let terminal = depth_to_go == 0 || next_board.status() != BoardStatus::Ongoing;
+
+        if terminal {
+            n += 1;
+            let score = board_score(&next_board, (max_depth - d) as i32);
+            let value = score_mul * score;
+            if value > stack[d].best_value {
+                // local improvement
+                stack[d].alpha = cmp::max(stack[d].alpha, value);
+                stack[d].best_index = stack[d].c_move;
+                stack[d].best_value = value;
+                stack[d].best_length = 1;
+                stack[d].best_line[0] = cmove;
+            }
+            stack[d].c_move += 1;
+        } else {
+            // push stack
+            stack[d + 1] = ABStack {
+                board: next_board,
+                alpha: -stack[d].beta, beta: -stack[d].alpha, orig_alpha: -stack[d].beta,
+                moves_with_score: unsafe { mem::uninitialized() },
+                num_moves: 0,
+                c_move: 0,
+                best_index: 0,
+                best_value: MIN_SCORE,
+                best_line: unsafe { mem::uninitialized() },
+                best_length: 0
+            };
+            d += 1;
+            score_mul *= -1;
         }
     }
-    if verbose {
-        for MoveAndScore {cmove, score} in moves_with_score[..num_moves].iter_mut() {
-            println!("{} {} {}", cmove.get_source(), cmove.get_dest(), -*score);
-            // println!("{} {} {} ({})", cmove.get_source(), cmove.get_dest(), -*score, find_line(board.make_move(*cmove), max_depth - 1, None));
-        }
+    stack[d].moves_with_score[..stack[d].num_moves].sort_unstable_by(|a, b| b.score.cmp(&a.score) );
+    println!("N: {}", n);
+    for MoveAndScore {cmove, score} in stack[0].moves_with_score[..stack[0].num_moves].iter() {
+        println!("{} {} {}", cmove.get_source().to_string(), cmove.get_dest().to_string(), score);
     }
-    
-    let best_move = &moves_with_score[0];
-    AlphaBetaResult { cmove: Some(best_move.cmove), score: -best_move.score }
+    let head = &stack[0];
+    let line = head.best_line[0..head.best_length].iter()
+        .cloned()
+        .collect();
+    AlphaBetaResult { score: head.best_value, line }
 }
 
 pub fn alpha_beta<'a>(info: SearchInfo<'a>, board: Board, depth: i32, mut alpha: Score, mut beta: Score) -> Score {
@@ -175,6 +248,6 @@ pub fn alpha_beta<'a>(info: SearchInfo<'a>, board: Board, depth: i32, mut alpha:
         ValueType::Exact
     };
     let entry = TEntry { hash: board.get_hash(), depth, value: result, value_type };
-    info.ttable.put(Box::new(entry));
+    info.ttable.put(entry);
     result
 }

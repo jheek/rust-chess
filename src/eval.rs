@@ -120,9 +120,17 @@ fn position_score(board: &Board, color: Color) -> Score {
     score
 }
 
-pub fn board_score(board: &Board, depth: i32) -> Score {
+pub fn quick_status(board: &Board, num_moves: usize) -> BoardStatus {
+    if num_moves == 0 {
+        if board.checkers().popcnt() > 0 { BoardStatus::Checkmate } else { BoardStatus::Stalemate }
+    } else {
+        BoardStatus::Ongoing
+    }
+}
+
+pub fn board_score(board: &Board, _moves: &[ChessMove; 256], num_moves: usize, depth: i32) -> Score {
     let active_color = board.side_to_move();
-    match board.status() {
+    match quick_status(board, num_moves) {
         BoardStatus::Checkmate if active_color == Color::White => -(WIN_SCORE + depth),
         BoardStatus::Checkmate => WIN_SCORE + depth,
         BoardStatus::Stalemate => DRAW_SCORE,

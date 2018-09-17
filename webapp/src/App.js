@@ -43,7 +43,7 @@ class App extends Component {
 
   handleMessage = (ev) => {
     let msg = JSON.parse(ev.data);
-    console.log(msg);
+    // console.log(msg);
     let autoplay = this.state[msg.side_to_move == "white" ? "autoplayWhite" : "autoplayBlack"];
     if (autoplay) {
       let line = msg.best_line;
@@ -110,7 +110,8 @@ class App extends Component {
     let bestLineTxt = "";
     if (line.length > 0) {
       focusTiles = [line[0].from, line[0].to];
-      bestLineTxt = this.state.bestValue + " " + line.map(({from, to}) => `${from}-${to}`).join(" ");
+      let lineTxt = line.map(({from, to}) => `${from}-${to}`).join(" ")
+      bestLineTxt = `${this.state.bestValue} ${line.length} ${lineTxt}`;
     }
     console.log("bestLineTxt", bestLineTxt)
     return (

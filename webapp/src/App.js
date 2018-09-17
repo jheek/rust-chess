@@ -8,6 +8,7 @@ class App extends Component {
     super()
     this.state = {
       lineup: Chess.getDefaultLineup(),
+      bestLine: [],
       legalMoves: [],
       autoplayBlack: false,
       autoplayWhite: false,
@@ -31,7 +32,7 @@ class App extends Component {
     this.ws.addEventListener("close", this.handleClose);
   }
 
-  isLegalMove = (from, to) => {
+  isLegalMove = ({from, to}) => {
     return this.state.legalMoves.some(({from: legalFrom, to: legalTo}) => (legalFrom == from && legalTo == to));
   }
 
@@ -67,17 +68,7 @@ class App extends Component {
   }
 
   handleMovePiece = (piece, from, to) => {
-    this.setState((state) => {
-      let lineup = this.state.lineup;
-      let newLineup = [...lineup];
-      if (this.isLegalMove(from, to)) {
-        newLineup = this.state.lineup.map((x) => x.replace(from, to));
-        this.ws.send(JSON.stringify({"Move": {from, to}}));
-      } else {
-        console.log("illegal move!", from, to, this.state.legalMoves);
-      }
-      return {...state, lineup: newLineup};
-    });
+    this.playMove({from, to});
   }
 
   handleInputChange = (event) => {
@@ -91,11 +82,33 @@ class App extends Component {
     }));
   }
 
+  handlePlayBestMove = () => {
+    let bestMove = this.state.bestLine[0];
+    if (bestMove) {
+      this.ws.send(JSON.stringify({"Move": bestMove}));
+    }
+  }
+
+  playMove(move) {
+    let {from, to} = move;
+    if (this.isLegalMove(move)) {
+      this.ws.send(JSON.stringify({"Move": move}));
+      this.setState((state) => {
+        let newLineup = this.state.lineup.map((x) => x.replace(from, to));
+        return {...state, bestLine: [], lineup: newLineup};
+      });
+      return true;
+    } else {
+      console.log("illegal move!", from, to, this.state.legalMoves);
+      return false;
+    }
+  }
+
   render() {
     let focusTiles = [];
     let line = this.state.bestLine;
     let bestLineTxt = "";
-    if (line && line.length > 0) {
+    if (line.length > 0) {
       focusTiles = [line[0].from, line[0].to];
       bestLineTxt = this.state.bestValue + " " + line.map(({from, to}) => `${from}-${to}`).join(" ");
     }
@@ -105,7 +118,7 @@ class App extends Component {
         <div className="Chess">
           <Chess pieces={this.state.lineup} onMovePiece={this.handleMovePiece} focusTiles={focusTiles} />
         </div>
-        <pre>
+        <pre style={{lineHeight: 1}}>
           {bestLineTxt}
         </pre>
         <form>
@@ -126,7 +139,10 @@ class App extends Component {
               onChange={this.handleInputChange} />
             AutoPlay Black
           </label>
+          <br/>
         </form>
+
+        <button disabled={line.length == 0} onClick={this.handlePlayBestMove}>Play best move</button>
       </div>
     );
   }

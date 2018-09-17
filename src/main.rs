@@ -59,11 +59,11 @@ enum WSRMessage {
 type Lineup = Vec<String>;
 
 fn main() {
-    let start = Instant::now();
-    let board = Board::default();
-    let n = board.perft(6);
-    let elapsed = start.elapsed();
-    println!("Elapsed: {}s {}m, N: {}", elapsed.as_secs(), elapsed.subsec_millis(), n);
+    // let start = Instant::now();
+    // let board = Board::default();
+    // let n = board.perft(6);
+    // let elapsed = start.elapsed();
+    // println!("Elapsed: {}s {}m, N: {}", elapsed.as_secs(), elapsed.subsec_millis(), n);
 
     listen("127.0.0.1:3012", handle_connection)
         .unwrap_or_else(|err| panic!("Cannot listen to port 3012: {}", err));
@@ -110,10 +110,10 @@ fn compute_ws_state(board: Board, result: &AlphaBetaResult) -> WSState {
 }
 
 fn handle_connection(out: Sender) -> impl Handler {
+    let ttable: TTable = TTable::new(8000 * 1024 * 1024);
     let board_cell = Cell::new(Board::default());
     let moves_cell = RefCell::new(([ChessMove::default(); 256], 0));
     move |raw_msg| {
-        let ttable = TTable::new(8000 * 1024 * 1024);
         match raw_msg {
             Message::Binary(_) => out.close(CloseCode::Error),
             Message::Text(text) => {
@@ -138,9 +138,10 @@ fn handle_connection(out: Sender) -> impl Handler {
                             }
                         };
 
-                        let best_move = find_best_move(board, 7, &ttable);
+                        let best_move = find_best_move(&ttable, &board, 6);
+                        *num_moves = board.enumerate_moves(moves);
 
-                        println!("board score: {}", board_score(&board, moves, *num_moves, 0));
+                        println!("board score: {}", board_score(&board, &moves[..*num_moves], 0));
                         for sq in board.checkers() {
                             println!("checkers: {}", sq.to_string());
                         }
@@ -148,7 +149,6 @@ fn handle_connection(out: Sender) -> impl Handler {
                             println!("pinned: {}", sq.to_string());
                         }
 
-                        *num_moves = board.enumerate_moves(moves);
                         let state = compute_ws_state(board, &best_move);
                         let msg = serde_json::to_string(&state).unwrap();
                         board_cell.set(board);

@@ -7,34 +7,46 @@ use atomic_option::AtomicOption;
 
 use std::sync::atomic::Ordering;
 
+use chess::*;
+
 #[derive(Debug, Clone, Copy)]
-pub enum ValueType {
-    Exact,
-    LowerBound,
-    UpperBound,
+pub enum ValueInfo {
+    Exact(Score),
+    LowerBound(Score),
+    UpperBound(Score),
 }
 
-use ValueType::*;
+use ValueInfo::*;
 
-impl ops::Not for ValueType {
-    type Output = ValueType;
-
-    fn not(self) -> ValueType {
-        match self {
-            Exact => Exact,
-            LowerBound => UpperBound,
-            UpperBound => LowerBound,
+impl ValueInfo {
+    pub fn as_approximation(self) -> Score {
+       match self {
+            Exact(s) => s,
+            LowerBound(s) => s,
+            UpperBound(s) => s,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+impl ops::Neg for ValueInfo {
+    type Output = ValueInfo;
+
+    fn neg(self) -> ValueInfo {
+        match self {
+            Exact(s) => Exact(-s),
+            LowerBound(s) => UpperBound(-s),
+            UpperBound(s) => LowerBound(-s),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct TEntry {
     pub hash: u64,
     pub depth: i32,
     // pub age: i32,
-    pub value: Score,
-    pub value_type: ValueType,
+    pub value: ValueInfo,
+    pub best_move: ChessMove,
 }
 
 pub struct TTable {

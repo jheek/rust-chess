@@ -2,6 +2,8 @@
 
 use chess::*;
 
+use std::cmp::max;
+
 pub type Score = i32;
 
 pub const WIN_SCORE: Score = 100000;
@@ -86,6 +88,17 @@ fn piece_score(piece: Piece) -> Score {
     }
 }
 
+fn piece_captureable_score(piece: Piece) -> Score {
+    match piece {
+        Piece::Bishop => 3,
+        Piece::Rook   => 4,
+        Piece::Knight => 3,
+        Piece::Pawn   => 2,
+        Piece::Queen  => 5,
+        Piece::King   => 10,
+    }
+}
+
 fn piece_position_table(piece: Piece) -> &'static[i32; 64] {
     match piece {
         Piece::Bishop => &PT_BISHOP,
@@ -120,6 +133,21 @@ fn position_score(board: &Board, color: Color) -> Score {
     score
 }
 
+fn movability_score(board: &Board, moves: &[ChessMove]) -> Score {
+    let mut movability = 0;
+    for &cmove in moves.iter() {
+        let piece = board.piece_on(cmove.get_source()).unwrap();
+        movability += match board.piece_on(cmove.get_dest()) {
+            None => 1,
+            Some(captured_piece) => max(1, (piece_score(captured_piece) - piece_score(piece)) / 10),
+        };
+    }
+    if board.side_to_move() == Color::Black {
+        movability = -movability;
+    }
+    movability
+}
+
 pub fn quick_status(board: &Board, num_moves: usize) -> BoardStatus {
     if num_moves == 0 {
         if board.checkers().popcnt() > 0 { BoardStatus::Checkmate } else { BoardStatus::Stalemate }
@@ -128,16 +156,33 @@ pub fn quick_status(board: &Board, num_moves: usize) -> BoardStatus {
     }
 }
 
-pub fn board_score(board: &Board, _moves: &[ChessMove; 256], num_moves: usize, depth: i32) -> Score {
+pub fn fast_board_score(board: &Board, depth: i32) -> Score {
     let active_color = board.side_to_move();
-    match quick_status(board, num_moves) {
+    let material = material_score(&board, Color::White) - material_score(&board, Color::Black);
+    let position = position_score(&board, Color::White) - position_score(&board, Color::Black);
+    let mut score = material + position;
+    if board.checkers().popcnt() > 0 {
+        if active_color == Color::White {
+            score -= WIN_SCORE + depth;
+        } else {
+            score += WIN_SCORE + depth;
+        }
+    }
+    score
+}
+
+pub fn board_score(board: &Board, moves: &[ChessMove], depth: i32) -> Score {
+    let active_color = board.side_to_move();
+    match quick_status(board, moves.len()) {
         BoardStatus::Checkmate if active_color == Color::White => -(WIN_SCORE + depth),
         BoardStatus::Checkmate => WIN_SCORE + depth,
         BoardStatus::Stalemate => DRAW_SCORE,
         BoardStatus::Ongoing => {
             let material = material_score(&board, Color::White) - material_score(&board, Color::Black);
             let position = position_score(&board, Color::White) - position_score(&board, Color::Black);
-            let score = material + position;
+            let movability = movability_score(&board, moves);
+            // let movability = 0;
+            let score = material + position + movability;
             score
         }
     }

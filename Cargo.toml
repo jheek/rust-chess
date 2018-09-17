@@ -16,4 +16,4 @@ atomic-option = "0.1.2"
 
 [profile.release]
 lto = true
-debug = true
+debug = false

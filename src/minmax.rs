@@ -2,8 +2,12 @@
 
 
 use std::mem;
-use std::cmp;
+use std::cmp::{min, max};
 use std::time::Instant;
+
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Sender;
+use std::sync::atomic::Ordering;
 
 use chess::*;
 use eval::*;
@@ -12,184 +16,198 @@ use ttable::*;
 pub struct AlphaBetaResult {
     pub line: Vec<ChessMove>,
     pub score: Score,
+    pub n: u64,
+    pub m: u64,
 }
 
-#[derive(Default, Copy, Clone)]
-struct MoveAndScore {
-    cmove: ChessMove,
-    score: Score,
-}
-
-pub const MAX_DEPTH: usize = 100;
-
-struct ABStack {
-    board: Board,
-    alpha: Score,
-    beta: Score,
-    orig_alpha: Score,
-    moves_with_score: [MoveAndScore; 256],
-    num_moves: usize,
-    c_move: usize,
-    best_index: usize,
+struct ABResult {
+    best_move: Option<ChessMove>,
     best_value: Score,
-    best_line: [ChessMove; MAX_DEPTH],
-    best_length: usize
+    n: u64,
+    m: u64,
 }
 
-pub fn find_best_move<'a>(board: Board, max_depth: usize, ttable: &'a TTable) -> AlphaBetaResult {
-    let now = Instant::now();
-    let global_score_mul = if board.side_to_move() == Color::White { 1 } else { -1 };
-    let mut score_mul = global_score_mul;
-    let mut stack: [ABStack; MAX_DEPTH] = unsafe { mem::uninitialized() };
-    let mut n: u64 = 0;
-    let mut matches: u64 = 0;
-    stack[0] = ABStack {
-        board,
-        alpha: MIN_SCORE, beta: MAX_SCORE, orig_alpha: MIN_SCORE,
-        moves_with_score: unsafe { mem::uninitialized() },
-        num_moves: 0,
-        c_move: 0,
-        best_index: 0,
-        best_value: MIN_SCORE,
-        best_line: unsafe { mem::uninitialized() },
-        best_length: 0
-    };
-    let mut d = 0;
-    loop {
-        let depth_to_go = (max_depth - d - 1) as i32;
-        if stack[d].c_move == 0 {
-            // if depth_to_go >= 1 {
-            if let Some(entry) = ttable.fetch(stack[d].board.get_hash()) {
-                if entry.depth >= depth_to_go {
-                    let value_type = if score_mul == 1 { entry.value_type } else { !entry.value_type };
-                    let value = score_mul * entry.value;
-                    matches += 1;
-                    match value_type {
-                        ValueType::Exact => {
-                            stack[d].alpha = cmp::max(stack[d].alpha, value);
-                            stack[d].beta = cmp::min(stack[d].beta, value + 1);
-                        },
-                        ValueType::LowerBound => {
-                            stack[d].alpha = cmp::max(stack[d].alpha, value);
-                        },
-                        ValueType::UpperBound => {
-                            stack[d].beta = cmp::min(stack[d].beta, value);
-                        },
-                    }
-                }
-            }
-            // }
-            // init moves
-            let mut moves:[ChessMove; 256] = unsafe { mem::uninitialized() };
-            let mut score_moves:[ChessMove; 256] = unsafe { mem::uninitialized() };
-            stack[d].num_moves = stack[d].board.enumerate_moves(&mut moves);
-            for (i, &cmove) in moves[..stack[d].num_moves].iter().enumerate() {
-                let move_board = stack[d].board.make_move(cmove);
-                let fast_score = ttable.fetch(move_board.get_hash())
-                    .map(|x| x.value)
-                    .unwrap_or_else(|| {
-                        let num_moves = move_board.enumerate_moves(&mut score_moves);
-                        board_score(&move_board, &score_moves, num_moves, depth_to_go)
-                    });
-
-                stack[d].moves_with_score[i] = MoveAndScore { cmove, score: score_mul * fast_score };
-            }
-            stack[d].moves_with_score[..stack[d].num_moves].sort_unstable_by(|a, b| b.score.cmp(&a.score) );
-            if stack[d].num_moves == 0 {
-                stack[d].best_value = score_mul * board_score(&stack[d].board, &moves, stack[d].num_moves, depth_to_go + 1)
-            }
+impl ABResult {
+    fn from_tentry(entry: TEntry, min_depth: i32) -> Option<ABResult> {
+        match entry {
+            TEntry { value: ValueInfo::Exact(best_value), depth, ..} if depth >= min_depth => Some(ABResult {best_value, best_move: Some(entry.best_move), n: 0, m: 1 }),
+            _ => None,
         }
-        // exit conditions
-        if stack[d].c_move == stack[d].num_moves || stack[d].alpha >= stack[d].beta {
-            // make ttable entry
-            let value = stack[d].best_value;
-            let mut value_type = if value <= stack[d].orig_alpha {
-                ValueType::LowerBound
-            } else if value >= stack[d].beta {
-                ValueType::UpperBound
-            } else {
-                ValueType::Exact
-            };
-            if score_mul == -1 {
-                value_type = !value_type;
-            }
-            // if depth_to_go >= 1 {
-            let entry = TEntry {
-                hash: stack[d].board.get_hash(),
-                value: value * score_mul,
-                depth: depth_to_go as i32,
-                value_type,
-            };
-            ttable.put(entry);
-            // }
-            // pop stack
-            if d == 0 {
+    }
+}
+
+pub struct ISUpdate {
+    pub line: Vec<ChessMove>,
+    pub score: Score,
+    pub depth: i32,
+}
+
+pub fn infinite_search(ttable: &TTable, board: &Board, max_depth: i32, kill_switch: AtomicBool, sender: Sender<ISUpdate>) {
+    let mut ticks = 0;
+    let mut callback = || {
+        ticks += 1;
+        return ticks % 10 == 0 && kill_switch.load(Ordering::Relaxed);
+    };
+    for depth in 1..=max_depth {
+        match alpha_beta_line(&mut callback, ttable, board, depth, MIN_SCORE, MAX_SCORE) {
+            Some(AlphaBetaResult {line, score, ..}) => {
+                if sender.send(ISUpdate { line, score, depth }).is_err() {
+                    break;
+                }
+            },
+            None => {
                 break;
             }
-            let value = -value;
-            d -= 1;
-            score_mul *= -1;
-            stack[d].moves_with_score[stack[d].c_move].score = value;
-            if value > stack[d].best_value {
-                stack[d].alpha = cmp::max(stack[d].alpha, value);
-                stack[d].best_index = stack[d].c_move;
-                stack[d].best_value = value;
-                let length = stack[d + 1].best_length;
-                stack[d].best_length = length + 1;
-                stack[d].best_line[0] = stack[d].moves_with_score[stack[d].c_move].cmove;
-                if let Some((head, tail)) = stack[d..].split_first_mut() {
-                    head.best_line[1..=length].copy_from_slice(&tail[0].best_line[0..length]);
-                } else {
-                    panic!("Can't split stack!");
-                }
-            }
-            stack[d].c_move += 1;
-
-            continue;
         }
-        let MoveAndScore {cmove, score: fast_score} = stack[d].moves_with_score[stack[d].c_move];
-        let next_board = stack[d].board.make_move(cmove);
-        let terminal = depth_to_go == 0;
+    }
+}
 
-        if terminal {
-            n += 1;
-            let value = fast_score;
-            if value > stack[d].best_value {
-                // local improvement
-                stack[d].alpha = cmp::max(stack[d].alpha, value);
-                stack[d].best_index = stack[d].c_move;
-                stack[d].best_value = value;
-                stack[d].best_length = 1;
-                stack[d].best_line[0] = cmove;
-            }
-            stack[d].c_move += 1;
+pub fn find_best_move(ttable: &TTable, board: &Board, depth: i32) -> AlphaBetaResult {
+    let start = Instant::now();
+    let result = alpha_beta_line(&mut || false, ttable, board, depth, MIN_SCORE, MAX_SCORE).unwrap();
+    let elapsed = start.elapsed();
+    println!("Elapsed: {}s {}m, N: {}, M: {}", elapsed.as_secs(), elapsed.subsec_millis(), result.n, result.m);
+    result
+}
+
+
+fn alpha_beta_line<F>(callback: &mut F, ttable: &TTable, board: &Board, depth: i32, alpha: Score, beta: Score) -> Option<AlphaBetaResult>
+    where F: FnMut() -> bool  {
+    let result = alpha_beta(callback, ttable, board, depth, MIN_SCORE, MAX_SCORE)?;
+    let mut line = Vec::with_capacity(depth as usize);
+    let mut sub_board = *board;
+    let mut sub_move = result.best_move;
+    let mut n = 0;
+    let mut m = 0;
+    while let Some(cmove) = sub_move {
+        line.push(cmove);
+        let d = line.len() as i32;
+        sub_move = if d < depth {
+            sub_board = sub_board.make_move(cmove);
+            let window = if sub_board.side_to_move() == board.side_to_move() { result.best_value } else { -result.best_value };
+            let sub_result = alpha_beta(callback, ttable, &sub_board, depth - d, window - 1, window)?;
+            n += sub_result.n;
+            m += sub_result.m;
+            sub_result.best_move
         } else {
-            // push stack
-            stack[d + 1] = ABStack {
-                board: next_board,
-                alpha: -stack[d].beta, beta: -stack[d].alpha, orig_alpha: -stack[d].beta,
-                moves_with_score: unsafe { mem::uninitialized() },
-                num_moves: 0,
-                c_move: 0,
-                best_index: 0,
-                best_value: MIN_SCORE,
-                best_line: unsafe { mem::uninitialized() },
-                best_length: 0
-            };
-            d += 1;
-            score_mul *= -1;
+            None
         }
     }
-    stack[d].moves_with_score[..stack[d].num_moves].sort_unstable_by(|a, b| b.score.cmp(&a.score) );
-    let elapsed = now.elapsed();
-    println!("Elapsed: {}s {}m", elapsed.as_secs(), elapsed.subsec_millis());
-    println!("n: {}, matches: {}", n, matches);
-    for MoveAndScore {cmove, score} in stack[0].moves_with_score[..stack[0].num_moves].iter() {
-        println!("{} {} {}", cmove.get_source().to_string(), cmove.get_dest().to_string(), score);
+    Some(AlphaBetaResult { line, score: result.best_value, n, m })
+}
+
+fn alpha_beta<F>(callback: &mut F, ttable: &TTable, board: &Board, depth: i32, alpha: Score, beta: Score) -> Option<ABResult>
+    where F: FnMut() -> bool {
+    let entry = ttable.fetch(board.get_hash());
+    if let Some(result) = entry.and_then(|entry| ABResult::from_tentry(entry, depth)) {
+        Some(result)
+    } else {
+        let mut moves_ar: [ChessMove; 256] = unsafe { mem::uninitialized() };
+        let num_moves = board.enumerate_moves(&mut moves_ar);
+        let moves = &moves_ar[..num_moves];
+        alpha_beta_raw(callback, ttable, board, &entry, moves, depth, alpha, beta)
     }
-    let head = &stack[0];
-    let line = head.best_line[0..head.best_length].iter()
-        .cloned()
-        .collect();
-    AlphaBetaResult { score: head.best_value, line }
+}
+
+fn alpha_beta_raw<F>(callback: &mut F, ttable: &TTable, board: &Board, entry_op: &Option<TEntry>, moves: &[ChessMove], depth: i32, mut alpha: Score, mut beta: Score) -> Option<ABResult>
+    where F: FnMut() -> bool {
+    if callback() {
+        return None;
+    }
+    let alpha_orig = alpha;
+    let score_mul = if board.side_to_move() == Color::White { 1 } else { -1 };
+    if moves.len() == 0 {
+        let value = score_mul * board_score(&board, moves, depth);
+        return Some(ABResult { best_move: None, best_value: value, n: 1, m: 0 });
+    }
+    let mut prev_best_move = None;
+    if let Some(entry) = entry_op {
+        prev_best_move = Some(entry.best_move);
+        if entry.depth >= depth {
+            match entry.value {
+                ValueInfo::Exact(best_value) => {
+                    return Some(ABResult { best_value, best_move: Some(entry.best_move), n: 0, m: 1 });
+                },
+                ValueInfo::LowerBound(value) => {
+                    alpha = max(alpha, value);
+                },
+                ValueInfo::UpperBound(value) => {
+                    beta = min(beta, value);
+                },
+            }
+            if alpha >= beta {
+                return Some(ABResult { best_value: entry.value.as_approximation(), best_move: Some(entry.best_move), n: 0, m: 1 });
+            }
+        } 
+    }
+
+    let mut moves_data: [(Board, Option<TEntry>); 256] = unsafe { mem::uninitialized() };
+    let mut ordered_moves: [(u8, Score); 256] = unsafe { mem::uninitialized() };
+    let mut best_value = MIN_SCORE;
+    let mut best_move = moves[0];
+    let mut n = 0;
+    let mut m = 0;
+    for (i, &cmove) in moves.iter().enumerate() {
+        let move_board = board.make_move(cmove);
+        let move_entry = ttable.fetch(move_board.get_hash());
+        let mut fast_score = move_entry
+            .map(|x| x.value.as_approximation())
+            .unwrap_or_else(|| score_mul * fast_board_score(&move_board, depth as i32));
+        if Some(cmove) == prev_best_move {
+            fast_score += 1000;
+        }
+        moves_data[i] = (move_board, move_entry);
+        ordered_moves[i] = (i as u8, fast_score);
+    }
+    ordered_moves[..moves.len()].sort_unstable_by(|(_, a), (_, b)| b.cmp(&a) );
+
+    for (ind, _) in ordered_moves[..moves.len()].iter() {
+        let i = *ind as usize;
+        let (move_board, move_entry) = &moves_data[i];
+        let cmove = moves[i];
+        let value;
+        if let Some(sub_result) = move_entry.and_then(|move_entry| ABResult::from_tentry(move_entry, depth - 1)) {
+            n += sub_result.n;
+            m += sub_result.m;
+            value = -sub_result.best_value;
+        } else {
+            let mut sub_moves_ar: [ChessMove; 256] = unsafe { mem::uninitialized() };
+            let sub_num_moves = move_board.enumerate_moves(&mut sub_moves_ar);
+            let sub_moves = &sub_moves_ar[..sub_num_moves];
+            if depth > 1 {
+                let sub_result = alpha_beta_raw(callback, ttable, move_board, move_entry, sub_moves, depth - 1, -beta, -alpha)?;
+
+                n += sub_result.n;
+                m += sub_result.m;
+                value = -sub_result.best_value;
+            } else {
+                value = score_mul * board_score(&move_board, sub_moves, depth);
+                n += 1;
+            }
+        }
+        
+        if value > best_value {
+            best_value = value;
+            best_move = cmove;
+            alpha = max(alpha, value);
+            if alpha >= beta {
+                break
+            }
+        }
+    }
+    let value = if best_value <= alpha_orig {
+        ValueInfo::UpperBound(best_value)
+    } else if best_value >= beta {
+        ValueInfo::LowerBound(best_value)
+    } else {
+        ValueInfo::Exact(best_value)
+    };
+    let entry = TEntry {
+        hash: board.get_hash(),
+        depth,
+        value,
+        best_move,
+    };
+    ttable.put(entry);
+    Some(ABResult { best_move: Some(best_move), best_value, n, m })
 }

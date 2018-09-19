@@ -1,10 +1,17 @@
 language: rust
 rust:
-  - stable
-  - beta
-  - nightly
+- stable
 cache: cargo
-matrix:
-  allow_failures:
-    - rust: nightly
-  fast_finish: true
+before_deploy:
+  - cargo build --release --verbose
+  - mkdir release
+  - cp target/release/rust_chess release/rust_chess
+deploy:
+  provider: releases
+  api_key:
+    secure: ga5oKugWtTRsYOY1ZABRHPyHXMUjZjyaEpayxuaCOms1JMxliTvvmfvB2ek4/pi8EuF26j8NgbMT8l85kridU98li2yA+bRKADB73jlWo1lnIWSmgE5MD96gnLHKOJ26ZKkoXgJV+sV/qF3hwByRBKn4XThua7MzMv6qrWRhJSBDEgHIUTtr5k5DHDLkvHWfobyPCqhtzGqLgzcXiO0Py1USFUIgOwjeU1uEXOwTxNm9Qj3SJxyELb8sKS5vsVM5BMb88vjwTj3IvrTG5qJctNqn20FtWBGGXNvjxHnKlz0gSYznC0mlPVzgtjw0E5MA7c2y5o0FDFl3ZceZ+ZWK4j4RftlRfNWmp0z3V62ei/EfAbglwQZezDGlgZIzwEHFCEdeg6VpLCKBkMkeyaAG20pck8RKD6EWbSb6tQidrgyc4mSuc86Ijo7G2Tew+heY1hRfSQol+OpQP13HcCusMLnhsn30uzAsDjfuvXn1o8U8WlVCRIzraW9YSJ3Ft5dGBuAgzpiAuMWBshz4vD4VoODxfC3Ud6+yXzS9g+z0qUIxdNnvF10pAhS0HCaUEIREP4hXxPqvh2zuB1BSs/Hou1fU8vxvPjAccStdQ3lV/AyFSKo/w6DzduBUVknTqZzz96MNbXVqPlouq4D63eAF8SrPh/OnZ1NMZ/n0Y6T4djI=
+  file: target/release/*
+  on:
+    tags: true
+  skip_cleanup: true
+  

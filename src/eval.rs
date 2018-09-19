@@ -180,8 +180,8 @@ pub fn board_score(board: &Board, moves: &[ChessMove], depth: i32) -> Score {
         BoardStatus::Ongoing => {
             let material = material_score(&board, Color::White) - material_score(&board, Color::Black);
             let position = position_score(&board, Color::White) - position_score(&board, Color::Black);
-            let movability = movability_score(&board, moves);
-            // let movability = 0;
+            // let movability = movability_score(&board, moves);
+            let movability = 0;
             let score = material + position + movability;
             score
         }

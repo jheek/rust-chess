@@ -72,7 +72,9 @@ impl TTable {
                 Box::new(entry)
             },
             Some(mut cur_entry) => {
-                *cur_entry = entry;
+                if cur_entry.hash != entry.hash || entry.depth >= cur_entry.depth {
+                    *cur_entry = entry;
+                }
                 cur_entry
             },
         };

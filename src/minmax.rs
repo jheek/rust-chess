@@ -32,7 +32,7 @@ struct ABResult {
 impl ABResult {
     fn from_tentry(entry: TEntry, min_depth: i32) -> Option<ABResult> {
         match entry {
-            TEntry { value: ValueInfo::Exact(best_value), depth, ..} if depth >= min_depth => Some(ABResult {best_value, best_move: Some(entry.best_move) }),
+            TEntry { value: ValueInfo::Exact(best_value), depth, ..} if depth == min_depth => Some(ABResult {best_value, best_move: Some(entry.best_move) }),
             _ => None,
         }
     }
@@ -88,8 +88,10 @@ impl Drop for InfiniteSearch {
 pub fn infinite_search(ttable: &TTable, board: &Board, max_depth: i32, kill_switch: &AtomicBool, sender: Sender<ISUpdate>) {
     let mut ticks = 0;
     let mut killed = false; 
-    let mut guess = [0, 0];
-    for depth in 1..=max_depth {
+    let mut guesses = [0, 0];
+    let entry_op = ttable.fetch(board.get_hash());
+    for depth in min(3, max_depth)..=max_depth {
+        let mut margin = 5;
         {
             let mut callback = || {
                 ticks += 1;
@@ -101,19 +103,43 @@ pub fn infinite_search(ttable: &TTable, board: &Board, max_depth: i32, kill_swit
                 }
             };
             let gi = (depth as usize) % 2;
-            for result in mtdf(&mut callback, ttable, board, depth, guess[gi]) {
-                guess[gi] = result.best_value;
-                match alpha_beta_line(&mut || false, ttable, board, depth, result) {
-                    Some(AlphaBetaResult {line, score, ..}) => {
-                        if sender.send(ISUpdate { line, score, depth }).is_err() {
-                            return;
+            let mut guess = guesses[gi];
+            if let Some(entry) = entry_op {
+                if entry.depth == depth {
+                    guess = entry.value.as_approximation();
+                }
+            }
+            let mut lower_bound = guess - margin;
+            let mut upper_bound = guess + margin;
+            for _retry in 0.. {
+                let (alpha, beta) = if depth <= 4 { (MIN_SCORE, MAX_SCORE) } else { (lower_bound, upper_bound) };
+                match alpha_beta(&mut callback, ttable, board, depth, alpha, beta) {
+                    Some(result) => {
+                        let value = result.best_value;
+                        match alpha_beta_line(&mut || false, ttable, board, depth, result) {
+                            Some(AlphaBetaResult {line, score, ..}) => {
+                                if sender.send(ISUpdate { line, score, depth }).is_err() {
+                                    return;
+                                }
+                            },
+                            None => {
+                                return;
+                            }
+                        }
+                        if value <= alpha {
+                            margin *= 2;
+                            lower_bound = min(value - 1, lower_bound - margin);
+                        } else if value >= beta {
+                            margin *= 2;
+                            upper_bound = max(value + 1, upper_bound + margin);
+                        } else {
+                            guesses[gi] = value;
+                            break;
                         }
                     },
-                    None => {
-                        return;
-                    }
+                    None => return,
                 }
-            };
+            }
         }
         if killed {
             return;
@@ -121,24 +147,49 @@ pub fn infinite_search(ttable: &TTable, board: &Board, max_depth: i32, kill_swit
     }
 }
 
-fn mtdf<'r, 'a: 'r, 'b: 'r, 'c: 'r, F>(callback: &'a mut F, ttable: &'b TTable, board: &'c Board, depth: i32, guess: Score) -> impl Iterator<Item=ABResult> + 'r
-    where F: FnMut() -> bool {
-    (0..).scan((MIN_SCORE, MAX_SCORE, guess), move |state, _x| {
-        let (lower_bound, upper_bound, guess) = state;
-        if lower_bound >= upper_bound {
-            return None;
-        }
-        let beta = max(*guess, *lower_bound + 1);
-        let result = alpha_beta(callback, ttable, board, depth, beta - 1, beta)?;
-        *guess = result.best_value;
-        if *guess < beta {
-            *upper_bound = *guess;
-        } else {
-            *lower_bound = *guess;
-        }
-        Some(result)
-    })
+fn aspiration_search<F>(callback: &mut F, ttable: &TTable, board: &Board, entry_op: &Option<TEntry>, moves: &[ChessMove], depth: i32, guess: Score) -> Option<ABResult>
+    where F: FnMut() -> bool{
+    let mut margin = 5;
+    let mut lower_bound = guess - margin;
+    let mut upper_bound = guess + margin;
+    loop {
+        let (alpha, beta) = if depth <= 2 { (MIN_SCORE, MAX_SCORE) } else { (lower_bound, upper_bound) };
+        match alpha_beta_raw(callback, ttable, board, entry_op, moves, depth, alpha, beta) {
+            Some(result) => {
+                let value = result.best_value;
+                if value <= alpha {
+                    margin *= 2;
+                    lower_bound = min(value - 1, lower_bound - margin);
+                } else if value >= beta {
+                    margin *= 2;
+                    upper_bound = max(value + 1, upper_bound + margin);
+                } else {
+                    return Some(result);
+                }
+            },
+            None => return None,
+        };
+    }
 }
+
+// fn mtdf<'r, 'a: 'r, 'b: 'r, 'c: 'r, F>(callback: &'a mut F, ttable: &'b TTable, board: &'c Board, depth: i32, guess: Score) -> impl Iterator<Item=ABResult> + 'r
+//     where F: FnMut() -> bool {
+//     (0..).scan((MIN_SCORE, MAX_SCORE, guess), move |state, _x| {
+//         let (lower_bound, upper_bound, guess) = state;
+//         if lower_bound >= upper_bound {
+//             return None;
+//         }
+//         let beta = max(*guess, *lower_bound + 1);
+//         let result = alpha_beta(callback, ttable, board, depth, beta - 1, beta)?;
+//         *guess = result.best_value;
+//         if *guess < beta {
+//             *upper_bound = *guess;
+//         } else {
+//             *lower_bound = *guess;
+//         }
+//         Some(result)
+//     })
+// }
 
 // pub fn find_best_move(ttable: &TTable, board: &Board, depth: i32) -> AlphaBetaResult {
 //     let best_move = alpha_beta(&mut || false, ttable, board, depth, MIN_SCORE, MAX_SCORE).unwrap();
@@ -193,7 +244,7 @@ fn alpha_beta_raw<F>(callback: &mut F, ttable: &TTable, board: &Board, entry_op:
     let mut prev_best_move = None;
     if let Some(entry) = entry_op {
         prev_best_move = Some(entry.best_move);
-        if entry.depth >= depth {
+        if entry.depth == depth {
             match entry.value {
                 ValueInfo::Exact(best_value) => {
                     return Some(ABResult { best_value, best_move: Some(entry.best_move) });

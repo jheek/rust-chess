@@ -1,4 +1,3 @@
-
 use eval::*;
 use std::mem;
 use std::ops;
@@ -20,7 +19,7 @@ use ValueInfo::*;
 
 impl ValueInfo {
     pub fn as_approximation(self) -> Score {
-       match self {
+        match self {
             Exact(s) => s,
             LowerBound(s) => s,
             UpperBound(s) => s,
@@ -61,22 +60,20 @@ impl TTable {
         for _ in 0..num {
             table.push(AtomicOption::empty());
         }
-        TTable {table}
+        TTable { table }
     }
 
     pub fn put(&self, entry: TEntry) {
         let index = self.hash_index(entry.hash);
         let bucket = &self.table[index];
         let boxed_entry = match bucket.take(Ordering::Relaxed) {
-            None => {
-                Box::new(entry)
-            },
+            None => Box::new(entry),
             Some(mut cur_entry) => {
                 if cur_entry.hash != entry.hash || entry.depth >= cur_entry.depth {
                     *cur_entry = entry;
                 }
                 cur_entry
-            },
+            }
         };
         self.table[index].swap(boxed_entry, Ordering::Relaxed);
     }
@@ -87,7 +84,11 @@ impl TTable {
         match bucket.take(Ordering::Relaxed) {
             None => None,
             Some(entry) => {
-                let result = if entry.hash == hash { Some(*entry) } else { None };
+                let result = if entry.hash == hash {
+                    Some(*entry)
+                } else {
+                    None
+                };
                 bucket.try_store(entry, Ordering::Relaxed);
                 result
             }
